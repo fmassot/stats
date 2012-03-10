@@ -1,4 +1,5 @@
 
+
 class Solver(object):
     def __init__(self, func, solver_method, preprocess=None, postprocess=None):
         #function which convert a vector of parameters into set of parameters of

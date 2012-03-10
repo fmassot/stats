@@ -1,24 +1,28 @@
 import numpy as np
 
+from functools import partial
+from scipy.cluster.vq import kmeans2
 from scipy.optimize import minimize
 from scipy.stats.distributions import norm
 
-from solver import Solver
 from utils import get_log_likelihood
+from solver import Solver
 
-class GaussianMixPDF(object):
+class GaussianMix(object):
     def __init__(self, params):
         mu = params.get('mu')
         sigma = params.get('sigma')
         p = np.array(params.get('p'))
-        p = np.array(p.tolist() + [1.-sum(p)])
+        p = np.abs(p.tolist() + [1.-sum(p)])
 
-        normals_pdf = [ (lambda obs: p_*norm(mu_, sigma_).pdf(obs)) for mu_, sigma_, p_ in zip(mu, sigma, p) ]
+        def normals_pdf(mu, sigma, p, obs):
+            return sum( [ p_*norm(mu_, sigma_).pdf(obs) for mu_, sigma_, p_ in zip(mu, sigma, p) ] )
+       
+        #WARNING: not very clever to use this function to compute log likelyhood: log(exp) is not very accurate...
+        self.pdf = partial(normals_pdf, mu, sigma, p)
+
         
-        def pdf(obs):
-            return sum(map(lambda f: f(obs) , normals_pdf))
-
-        self.pdf = pdf
+        self.log_pdf = None
 
     @classmethod
     def postprocess_func(kls, params):
@@ -35,35 +39,65 @@ class GaussianMixPDF(object):
                  'p': x[r*2:]
                }
 
-def gaussian_mix_generator(mu, sigma, p, size=1000):
+def gaussian_mix_generator(mu, sigma, p, size=10000):
     gaussians = np.zeros((size, len(mu)))
     p = np.array(p)
-    for id, (m, s, p) in enumerate(zip(mu, sigma, p)):
-        gaussians[:,id] = p*np.random.normal(m, s, size=size)
+    p = np.array(p.tolist() + [1.-sum(p)])
+    multinomial = np.random.multinomial(1, p, size=size)
+    for id, (m, s) in enumerate(zip(mu, sigma)):
+        gaussians[:, id] += np.random.normal(m, s, size=size)
     
-    return gaussians.sum(1)
+    return (gaussians * multinomial).sum(1)
 
-def test_max_likelihood():
-    #simple test with a two gaussian mix
-    params = { 'mu': [0., 1.],
-               'sigma': [1., 5.], 
-               'p': [0.3] }
+def test_max_likelihood(params=None, params0=None, method="L-BFGS-B"):
+    #simple test with a two gaussian mixture
+    if not params:
+        params = { 'mu': [0., 5.],
+                   'sigma': [0.01, 0.01], 
+                   'p': [0.5] }
 
     obs = gaussian_mix_generator(params['mu'], params['sigma'], params['p'])
 
-    
-    func_to_minimize = lambda params: -get_log_likelihood( GaussianMixPDF(params).pdf, obs)
-    solver = Solver(func_to_minimize, minimize, preprocess=GaussianMixPDF.preprocess_func,
-                    postprocess=GaussianMixPDF.postprocess_func)
+    """
+    def penalize(params):
+        penalization = 0
+        if True in (np.array(params['p'])<0.01):
+            penalization += 10000000.
+        if True in (np.array(params['sigma'])<0.01):
+            penalization += 10000000.
+        return penalization
+    """
 
-    params0 = { 'mu': [0., 0.],
-               'sigma': [1., 1.], 
-               'p': [0.5] }
-   
+    func_to_minimize = lambda params:  - get_log_likelihood( GaussianMix(params).pdf, obs)
+    solver = Solver(func_to_minimize, minimize, preprocess=GaussianMix.preprocess_func,
+                    postprocess=GaussianMix.postprocess_func)
+
     bounds = ( (None, None), (None, None),
                (0., None), (0., None),
                (0., 1.) )
-    res = solver.solve(params0)
-    print res
+
+    #the initial point is set by kmeans
+    k = len(params['mu'])
+    kmeans_res = kmeans2(obs, k)
+    mu0 = kmeans_res[0]
+    sigma0 = np.zeros(k)
+    p0 = np.zeros(k)
+
+    for id in range(k):
+        sigma0[id] = obs[np.where(kmeans_res[1]==id)].std()
+        p0[id] = np.where(kmeans_res[1]==id)[0].size * 1. / obs.size
+
+    params0 = { 'mu': mu0.tolist(),
+                'sigma': sigma0.tolist(),
+                'p': p0[:-1].tolist()
+                }
+    print "initial point", params0
+
+    res = solver.solve(params0, method=method, bounds=bounds)
+    print "final point", res
+
+    print "function value for the correct point", func_to_minimize(params)
+    print "function value for the initial point", func_to_minimize(params0)
+    print "function value for the final point", func_to_minimize(res)
 
 
